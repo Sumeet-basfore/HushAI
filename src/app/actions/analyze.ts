@@ -1,33 +1,78 @@
 "use server";
 
-import { YoutubeTranscript } from "youtube-transcript";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { spawn } from "child_process";
+import path from "path";
 
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
+
+// Helper to extract video ID
+function getVideoId(url: string): string | null {
+  const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
+  const match = url.match(regExp);
+  return (match && match[2].length === 11) ? match[2] : null;
+}
 
 export async function analyzeTranscript(url: string) {
   try {
     console.log(`Analyzing: ${url}`);
 
-    // 1. Validate URL
-    if (!url.includes("youtube.com") && !url.includes("youtu.be")) {
+    // 1. Validate URL & Extract ID
+    const videoId = getVideoId(url);
+    if (!videoId) {
       return { success: false, error: "Invalid YouTube URL" };
     }
 
-    // 2. Fetch Transcript
-    // youtube-transcript throws if no transcript found or disabled
-    const transcriptItems = await YoutubeTranscript.fetchTranscript(url);
+    // 2. Fetch Transcript via Python Script
+    console.log(`Fetching transcript for ID: ${videoId}`);
+    const scriptPath = path.join(process.cwd(), "get_transcript.py");
 
-    if (!transcriptItems || transcriptItems.length === 0) {
-      return { success: false, error: "No transcript found for this video." };
+    // Wrap python execution in a promise
+    const transcriptData = await new Promise<any[]>((resolve, reject) => {
+      const pythonProcess = spawn("python3", [scriptPath, videoId]);
+
+      let dataString = "";
+      let errorString = "";
+
+      pythonProcess.stdout.on("data", (data) => {
+        dataString += data.toString();
+      });
+
+      pythonProcess.stderr.on("data", (data) => {
+        errorString += data.toString();
+      });
+
+      pythonProcess.on("close", (code) => {
+        if (code !== 0) {
+          console.error("Python script error:", errorString);
+          // Try to parse error json if possible
+          try {
+             const errObj = JSON.parse(errorString);
+             reject(new Error(errObj.error || "Unknown python error"));
+          } catch {
+             reject(new Error("Failed to fetch transcript. The video might not have captions or is restricted."));
+          }
+          return;
+        }
+
+        try {
+          const result = JSON.parse(dataString);
+          resolve(result);
+        } catch (e) {
+          console.error("Failed to parse python output:", dataString);
+          reject(new Error("Failed to parse transcript data"));
+        }
+      });
+    });
+
+    if (!transcriptData || transcriptData.length === 0) {
+      return { success: false, error: "No transcript found." };
     }
 
     // Combine text
-    const fullText = transcriptItems.map((item) => item.text).join(" ");
+    const fullText = transcriptData.map((item) => item.text).join(" ");
 
-    // Truncate if too long (Gemini Flash has large context, but let's be safe/efficient)
-    // ~1 hour of talking is roughly 10k words. Flash can handle 1M tokens.
-    // We'll send the whole thing unless it's absurdly huge.
+    // Truncate if too long
     const maxLength = 100000;
     const textToAnalyze = fullText.length > maxLength
       ? fullText.substring(0, maxLength)
