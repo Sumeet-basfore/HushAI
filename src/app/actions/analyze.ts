@@ -1,10 +1,14 @@
 "use server";
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import OpenAI from "openai";
 import { spawn } from "child_process";
 import path from "path";
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY || "");
+// Initialize OpenAI client for OpenRouter
+const openai = new OpenAI({
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: process.env.OPENROUTER_API_KEY,
+});
 
 // Helper to extract video ID
 function getVideoId(url: string): string | null {
@@ -13,7 +17,7 @@ function getVideoId(url: string): string | null {
   return (match && match[2].length === 11) ? match[2] : null;
 }
 
-export async function analyzeTranscript(url: string) {
+export async function analyzeTranscript(url: string, scriptLength: "short" | "long" = "short", longFormWords: number = 1000) {
   try {
     console.log(`Analyzing: ${url}`);
 
@@ -27,7 +31,7 @@ export async function analyzeTranscript(url: string) {
     console.log(`Fetching transcript for ID: ${videoId}`);
     const scriptPath = path.join(process.cwd(), "get_transcript.py");
 
-    // Wrap python execution in a promise
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const transcriptData = await new Promise<any[]>((resolve, reject) => {
       const pythonProcess = spawn("python3", [scriptPath, videoId]);
 
@@ -58,7 +62,7 @@ export async function analyzeTranscript(url: string) {
         try {
           const result = JSON.parse(dataString);
           resolve(result);
-        } catch (e) {
+        } catch {
           console.error("Failed to parse python output:", dataString);
           reject(new Error("Failed to parse transcript data"));
         }
@@ -72,48 +76,100 @@ export async function analyzeTranscript(url: string) {
     // Combine text
     const fullText = transcriptData.map((item) => item.text).join(" ");
 
-    // Truncate if too long
-    const maxLength = 100000;
-    const textToAnalyze = fullText.length > maxLength
-      ? fullText.substring(0, maxLength)
-      : fullText;
+    // Use shared analysis logic
+    return await analyzeText(fullText, scriptLength, longFormWords);
 
-    console.log(`Transcript length: ${textToAnalyze.length}`);
+  } catch (error: unknown) {
+    console.error("Error in analyzeTranscript:", error);
+    const errorMessage = error instanceof Error ? error.message : "Failed to analyze video";
+    return { success: false, error: errorMessage };
+  }
+}
 
-    // 3. Send to Gemini
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-
-    const prompt = `
-      Analyze the following YouTube video transcript and identifying the most "viral" segments.
-
-      Output ONLY a raw JSON array of strings, where each string is a catchy, viral hook or summary of a key segment.
-      Do not output markdown code blocks. Just the JSON array.
-
-      Transcript:
-      "${textToAnalyze}"
-    `;
-
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
-
-    console.log("Gemini response:", text);
-
-    // Clean up potential markdown formatting if Gemini ignores instructions
-    const cleanedText = text.replace(/```json/g, "").replace(/```/g, "").trim();
-
-    let hooks: string[] = [];
+export async function analyzeText(text: string, scriptLength: "short" | "long" = "short", longFormWords: number = 1000) {
     try {
-      hooks = JSON.parse(cleanedText);
-    } catch (e) {
-      console.error("Failed to parse Gemini JSON:", text);
-      return { success: false, error: "AI response format error" };
+        // Truncate if too long
+        const maxLength = 100000;
+        const textToAnalyze = text.length > maxLength
+          ? text.substring(0, maxLength)
+          : text;
+
+        console.log(`Analyzing text length: ${textToAnalyze.length}`);
+
+        // Calculate word counts based on script type
+        // Short form: 60 seconds at ~130-150 words per minute = ~130-150 words
+        // Long form: user-selected word count
+        const shortFormWords = 140; // Fixed for 60 seconds
+        const longFormWordsFinal = scriptLength === "long" ? longFormWords : 1000;
+
+        // 3. Send to OpenRouter (using Gemini via OpenRouter)
+        // Using a free model available on OpenRouter
+        const model = "arcee-ai/trinity-large-preview:free";
+
+        const systemPrompt = `
+          Analyze the following content and generate ORIGINAL, INSPIRED viral content - NOT a copy or direct summary.
+          
+          The key is to use the provided content as INSPIRATION to create fresh, unique scripts that capture the essence and style while being completely original content.
+          
+          Generate the following based on script type:
+          ${scriptLength === "short" ? `
+          - SHORT FORM: Exactly ~${shortFormWords} words (designed for 60-second video)
+          - Create an engaging, punchy script optimized for short-form platforms (Reels, TikTok, YouTube Shorts)
+          - Include hook, value proposition, and call-to-action
+          ` : `
+          - LONG FORM: Approximately ${longFormWordsFinal} words (designed for ${Math.round(longFormWordsFinal / 130)}-minute video)
+          - Create a comprehensive, well-structured script for long-form content (YouTube, LinkedIn)
+          - Include intro hook, main body with key points, and conclusion with CTA
+          `}
+          
+          Output ONLY a raw JSON object with the following structure:
+          {
+            "hooks": ["3-5 catchy viral hooks"],
+            "scripts": [
+              { "title": "Short Form Script (60 seconds)", "content": "..." },
+              { "title": "Long Form Script (~${longFormWordsFinal} words)", "content": "..." }
+            ],
+            "description": "A compelling YouTube video description with SEO keywords.",
+            "captions": ["3 Instagram/LinkedIn caption options"],
+            "hashtags": ["15-20 relevant hashtags"],
+            "related_ideas": ["5 future content ideas based on this topic"]
+          }
+          
+          IMPORTANT: 
+          - Create ORIGINAL content inspired by the source material, not direct copying
+          - The scripts should capture the STYLE, TONE, and TOPIC from the inspiration
+          - Do not output markdown code blocks. Just the JSON object.
+        `;
+
+        const completion = await openai.chat.completions.create({
+          model: model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: textToAnalyze }
+          ],
+        });
+
+        const responseText = completion.choices[0].message.content || "";
+        console.log("OpenRouter response:", responseText);
+
+        // Clean up potential markdown formatting if AI ignores instructions
+    // Match first { to last } to extract JSON object
+    const jsonMatch = responseText.match(/\{[\s\S]*\}/);
+    const cleanedText = jsonMatch ? jsonMatch[0] : responseText.replace(/```json/g, "").replace(/```/g, "").trim();
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let resultData: any = {};
+    try {
+      resultData = JSON.parse(cleanedText);
+    } catch {
+      console.error("Failed to parse AI JSON:", responseText);
+      return { success: false, error: "AI response format error. Raw: " + responseText.substring(0, 100) + "..." };
     }
 
-    return { success: true, data: { hooks } };
-
-  } catch (error: any) {
-    console.error("Error in analyzeTranscript:", error);
-    return { success: false, error: error.message || "Failed to analyze video." };
-  }
+    return { success: true, data: resultData };
+    } catch (error: unknown) {
+        console.error("Error in analyzeText:", error);
+        const errorMessage = error instanceof Error ? error.message : "Failed to analyze text";
+        return { success: false, error: errorMessage };
+    }
 }

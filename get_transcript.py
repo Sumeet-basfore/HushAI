@@ -6,17 +6,41 @@ def get_transcript(video_id):
     try:
         api = YouTubeTranscriptApi()
         transcript_list = api.list(video_id)
-        # Try to find english, or auto-generated english
+
+        transcript = None
+
+        # Priority 1: Manual English
         try:
-             transcript = transcript_list.find_transcript(['en'])
+            transcript = transcript_list.find_manually_created_transcript(['en'])
         except:
+            pass
+
+        # Priority 2: Generated English
+        if not transcript:
+            try:
+                transcript = transcript_list.find_generated_transcript(['en'])
+            except:
+                pass
+
+        # Priority 3: Any English (fallback)
+        if not transcript:
              try:
-                 transcript = transcript_list.find_generated_transcript(['en'])
+                transcript = transcript_list.find_transcript(['en'])
              except:
-                 # Fallback to any transcript if english fails? Or just let it fail
-                 # Let's try to get translation if needed?
-                 # ideally we want 'en'
-                 transcript = transcript_list.find_transcript(['en'])
+                pass
+
+        # Priority 4: First available (Desperation)
+        if not transcript:
+            try:
+                # iterates and returns the first one
+                for t in transcript_list:
+                    transcript = t
+                    break
+            except:
+                pass
+
+        if not transcript:
+            raise Exception("No suitable transcript found.")
 
         fetched = transcript.fetch()
 
@@ -24,7 +48,14 @@ def get_transcript(video_id):
         formatted = [{"text": i.text, "offset": i.start, "duration": i.duration} for i in fetched]
         print(json.dumps(formatted))
     except Exception as e:
-        print(json.dumps({"error": str(e)}), file=sys.stderr)
+        # Check if it's a "TranscriptsDisabled" or similar known error structure
+        error_msg = str(e)
+        if "TranscriptsDisabled" in error_msg:
+             error_msg = "Transcripts are disabled for this video."
+        elif "NoTranscriptFound" in error_msg:
+             error_msg = "No English transcript found."
+
+        print(json.dumps({"error": error_msg}), file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":

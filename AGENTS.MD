@@ -37,10 +37,10 @@
 - [x] Deploy to Vercel and verify live URL
 
 ### Phase 2: The Brain (Days 4-7)
-- [ ] Install `youtube-transcript` library
-- [ ] Create Server Action: `analyzeTranscript(url)`
-- [ ] Connect Google Gemini API (Free Tier)
-- [ ] Display raw viral hooks on the frontend
+- [x] Install `youtube-transcript` library (Switched to Python `youtube-transcript-api`)
+- [x] Create Server Action: `analyzeTranscript(url)`
+- [x] Connect Google Gemini API (Switched to OpenRouter)
+- [x] Display raw viral hooks on the frontend
 
 ### Phase 3: The Polish & Uploads (Days 8-11)
 - [ ] Implement FFmpeg.wasm for local audio extraction
